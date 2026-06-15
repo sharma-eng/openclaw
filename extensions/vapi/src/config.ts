@@ -5,20 +5,20 @@ import {
 } from "openclaw/plugin-sdk/secret-input";
 import { z } from "zod";
 
-const VapiWebhookConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  port: z.number().int().min(1).max(65535).default(3011),
-  path: z.string().default("/vapi/webhook"),
-  secret: buildSecretInputSchema().optional(),
-});
-
 export const VapiPluginConfigSchema = z.object({
   apiKey: buildSecretInputSchema(),
   assistantId: z.string().optional(),
   phoneNumberId: z.string().optional(),
   // OpenClaw agent ID (e.g. Emma's agent ID) that handles inbound call events.
   agentId: z.string().optional(),
-  webhook: VapiWebhookConfigSchema.default({}),
+  webhook: z
+    .object({
+      enabled: z.boolean().default(false),
+      port: z.number().int().min(1).max(65535).default(3011),
+      path: z.string().default("/vapi/webhook"),
+      secret: buildSecretInputSchema().optional(),
+    })
+    .optional(),
 });
 
 export type VapiPluginConfig = z.infer<typeof VapiPluginConfigSchema>;
@@ -39,13 +39,14 @@ export interface VapiResolvedConfig {
 export function parseVapiConfig(raw: unknown): VapiResolvedConfig {
   const config = VapiPluginConfigSchema.parse(raw);
 
-  const apiKey = normalizeResolvedSecretInputString(config.apiKey);
+  const apiKey = normalizeResolvedSecretInputString({ value: config.apiKey, path: "apiKey" });
   if (!apiKey) {
     throw new Error("Vapi plugin: apiKey is required but was not resolved.");
   }
 
-  const webhookSecret = config.webhook.secret
-    ? normalizeResolvedSecretInputString(config.webhook.secret)
+  const wh = config.webhook;
+  const webhookSecret = wh?.secret
+    ? normalizeResolvedSecretInputString({ value: wh.secret, path: "webhook.secret" })
     : undefined;
 
   return {
@@ -54,9 +55,9 @@ export function parseVapiConfig(raw: unknown): VapiResolvedConfig {
     phoneNumberId: config.phoneNumberId,
     agentId: config.agentId,
     webhook: {
-      enabled: config.webhook.enabled,
-      port: config.webhook.port,
-      path: config.webhook.path,
+      enabled: wh?.enabled ?? false,
+      port: wh?.port ?? 3011,
+      path: wh?.path ?? "/vapi/webhook",
       secret: webhookSecret ?? undefined,
     },
   };

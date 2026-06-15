@@ -1,6 +1,8 @@
+import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { info, warn } from "openclaw/plugin-sdk/runtime-env";
+import { Type } from "typebox";
 import { isVapiConfigured, parseVapiConfig } from "./src/config.js";
 import { VapiClient } from "./src/vapi-client.js";
 import { VapiWebhookServer } from "./src/webhook-server.js";
@@ -18,14 +20,37 @@ interface VapiRuntime {
 }
 
 function getGlobalRuntime(): VapiRuntime | undefined {
-  return (globalThis as Record<symbol, unknown>)[RUNTIME_KEY] as
-    | VapiRuntime
-    | undefined;
+  return (globalThis as Record<symbol, unknown>)[RUNTIME_KEY] as VapiRuntime | undefined;
 }
 
 function setGlobalRuntime(runtime: VapiRuntime | undefined): void {
   (globalThis as Record<symbol, unknown>)[RUNTIME_KEY] = runtime;
 }
+
+// ---------------------------------------------------------------------------
+// Tool schema (TypeBox)
+// ---------------------------------------------------------------------------
+
+const VapiCallToolSchema = Type.Union([
+  Type.Object({
+    action: Type.Literal("initiate"),
+    phoneNumber: Type.String({ description: "E.164 number to call, e.g. +15550001234" }),
+    assistantId: Type.Optional(
+      Type.String({ description: "Vapi assistant ID (overrides plugin default)" }),
+    ),
+    firstMessage: Type.Optional(
+      Type.String({ description: "Override the assistant's opening spoken message" }),
+    ),
+  }),
+  Type.Object({
+    action: Type.Literal("status"),
+    callId: Type.String({ description: "Vapi call ID returned from initiate" }),
+  }),
+  Type.Object({
+    action: Type.Literal("end"),
+    callId: Type.String({ description: "Vapi call ID to hang up" }),
+  }),
+]);
 
 // ---------------------------------------------------------------------------
 // Config schema with UI hints
@@ -101,6 +126,11 @@ export default definePluginEntry({
       return runtime;
     };
 
+    const json = (payload: unknown) => ({
+      content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+      details: payload,
+    });
+
     // -------------------------------------------------------------------------
     // Tool: vapi_call
     // Registered on Emma (or any agent with agentId) so the agent can
@@ -113,129 +143,49 @@ export default definePluginEntry({
       description:
         "Initiate, check status, or end a Vapi phone call. " +
         "Use action=initiate to start a call, action=status to poll it, action=end to hang up.",
-      parameters: {
-        type: "object",
-        oneOf: [
-          {
-            description: "Initiate an outbound phone call via Vapi.",
-            properties: {
-              action: { type: "string", const: "initiate" },
-              phoneNumber: {
-                type: "string",
-                description: "E.164 number to call, e.g. +15550001234",
-              },
-              assistantId: {
-                type: "string",
-                description:
-                  "Vapi assistant ID to use (overrides plugin default).",
-              },
-              firstMessage: {
-                type: "string",
-                description:
-                  "Override the assistant's opening spoken message.",
-              },
-            },
-            required: ["action", "phoneNumber"],
-            additionalProperties: false,
-          },
-          {
-            description: "Check the status of an active or ended Vapi call.",
-            properties: {
-              action: { type: "string", const: "status" },
-              callId: {
-                type: "string",
-                description: "Vapi call ID returned from initiate.",
-              },
-            },
-            required: ["action", "callId"],
-            additionalProperties: false,
-          },
-          {
-            description: "End (hang up) an active Vapi call.",
-            properties: {
-              action: { type: "string", const: "end" },
-              callId: {
-                type: "string",
-                description: "Vapi call ID to hang up.",
-              },
-            },
-            required: ["action", "callId"],
-            additionalProperties: false,
-          },
-        ],
-      } as unknown as Parameters<typeof api.registerTool>[0]["parameters"],
+      parameters: VapiCallToolSchema,
 
       async execute(_toolCallId, params) {
         const { client } = ensureRuntime();
         const p = params as Record<string, unknown>;
 
-        if (p["action"] === "initiate") {
-          const phoneNumber = p["phoneNumber"] as string;
-          const assistantId =
-            (p["assistantId"] as string | undefined) ?? config.assistantId;
-          const firstMessage = p["firstMessage"] as string | undefined;
+        try {
+          if (p["action"] === "initiate") {
+            const phoneNumber = p["phoneNumber"] as string;
+            const assistantId = (p["assistantId"] as string | undefined) ?? config.assistantId;
+            const firstMessage = p["firstMessage"] as string | undefined;
 
-          if (!assistantId) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: "Cannot initiate call: no assistantId provided and no default configured in the Vapi plugin.",
-                },
-              ],
-            };
+            if (!assistantId) {
+              return json({
+                error: "Cannot initiate call: no assistantId provided and no default configured.",
+              });
+            }
+
+            const call = await client.createCall({
+              assistantId,
+              phoneNumberId: config.phoneNumberId,
+              customer: { number: phoneNumber },
+              assistantOverrides: firstMessage ? { firstMessage } : undefined,
+            });
+
+            return json({ callId: call.id, status: call.status, initiated: true });
           }
 
-          const call = await client.createCall({
-            assistantId,
-            phoneNumberId: config.phoneNumberId,
-            customer: { number: phoneNumber },
-            assistantOverrides: firstMessage ? { firstMessage } : undefined,
-          });
+          if (p["action"] === "status") {
+            const call = await client.getCall(p["callId"] as string);
+            return json({ callId: call.id, status: call.status, endedReason: call.endedReason });
+          }
 
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Call initiated — ID: ${call.id}, status: ${call.status}`,
-              },
-            ],
-            details: call,
-          };
+          if (p["action"] === "end") {
+            const callId = p["callId"] as string;
+            await client.endCall(callId);
+            return json({ callId, ended: true });
+          }
+
+          return json({ error: `Unknown action: ${String(p["action"])}` });
+        } catch (err) {
+          return json({ error: String(err) });
         }
-
-        if (p["action"] === "status") {
-          const call = await client.getCall(p["callId"] as string);
-          const detail = call.endedReason ? `, ended: ${call.endedReason}` : "";
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Call ${call.id}: ${call.status}${detail}`,
-              },
-            ],
-            details: call,
-          };
-        }
-
-        if (p["action"] === "end") {
-          const callId = p["callId"] as string;
-          await client.endCall(callId);
-          return {
-            content: [
-              { type: "text" as const, text: `Call ${callId} ended.` },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Unknown vapi_call action: ${String(p["action"])}`,
-            },
-          ],
-        };
       },
     });
 
@@ -249,15 +199,14 @@ export default definePluginEntry({
         const { client } = ensureRuntime();
         const p = params as Record<string, unknown>;
         const phoneNumber = p["phoneNumber"] as string | undefined;
-        const assistantId =
-          (p["assistantId"] as string | undefined) ?? config.assistantId;
+        const assistantId = (p["assistantId"] as string | undefined) ?? config.assistantId;
 
         if (!phoneNumber) {
-          respond(false, undefined, "phoneNumber is required");
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "phoneNumber is required"));
           return;
         }
         if (!assistantId) {
-          respond(false, undefined, "assistantId is required (or set a default in plugin config)");
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "assistantId is required (or set a default in plugin config)"));
           return;
         }
 
@@ -275,11 +224,9 @@ export default definePluginEntry({
       "vapi.call.status",
       async ({ params, respond }) => {
         const { client } = ensureRuntime();
-        const callId = (params as Record<string, unknown>)["callId"] as
-          | string
-          | undefined;
+        const callId = (params as Record<string, unknown>)["callId"] as string | undefined;
         if (!callId) {
-          respond(false, undefined, "callId is required");
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "callId is required"));
           return;
         }
         const call = await client.getCall(callId);
@@ -292,11 +239,9 @@ export default definePluginEntry({
       "vapi.call.end",
       async ({ params, respond }) => {
         const { client } = ensureRuntime();
-        const callId = (params as Record<string, unknown>)["callId"] as
-          | string
-          | undefined;
+        const callId = (params as Record<string, unknown>)["callId"] as string | undefined;
         if (!callId) {
-          respond(false, undefined, "callId is required");
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "callId is required"));
           return;
         }
         await client.endCall(callId);
@@ -365,9 +310,7 @@ export default definePluginEntry({
               // End-of-call report — useful for logging or memory.
               case "end-of-call-report": {
                 if (agentId && message.summary) {
-                  info(
-                    `Vapi call ended (agent ${agentId}). Summary: ${message.summary}`
-                  );
+                  info(`Vapi call ended (agent ${agentId}). Summary: ${message.summary}`);
                 }
                 return {};
               }
