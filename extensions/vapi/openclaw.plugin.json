@@ -1,0 +1,81 @@
+{
+  "id": "vapi",
+  "name": "Vapi",
+  "description": "Vapi voice-calling plugin. Lets OpenClaw agents initiate and receive phone calls via Vapi's voice AI platform.",
+  "activation": {
+    "onStartup": false
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "vapi",
+        "authMethods": ["api-key"],
+        "envVars": ["VAPI_API_KEY"]
+      }
+    ]
+  },
+  "uiHints": {
+    "apiKey": {
+      "label": "Vapi API Key",
+      "help": "Your Vapi private API key from dashboard.vapi.ai → Account → API Keys.",
+      "sensitive": true,
+      "placeholder": "vapi_..."
+    },
+    "assistantId": {
+      "label": "Assistant ID",
+      "help": "Default Vapi assistant ID used when initiating outbound calls."
+    },
+    "phoneNumberId": {
+      "label": "Phone Number ID",
+      "help": "Vapi phone number ID to use as the caller for outbound calls."
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "help": "OpenClaw agent ID to route inbound call events to (e.g. the ID of your Emma agent)."
+    },
+    "webhook.enabled": {
+      "label": "Enable Webhook Server",
+      "help": "Start a local HTTP server so Vapi can deliver call events to this OpenClaw instance."
+    },
+    "webhook.port": {
+      "label": "Webhook Port",
+      "help": "Port the Vapi webhook server listens on (default: 3011). Set the matching Server URL in your Vapi assistant."
+    },
+    "webhook.path": {
+      "label": "Webhook Path",
+      "help": "HTTP path for the webhook endpoint (default: /vapi/webhook)."
+    },
+    "webhook.secret": {
+      "label": "Webhook Secret",
+      "help": "Optional bearer token Vapi sends in Authorization header for request verification.",
+      "sensitive": true
+    }
+  },
+  "contracts": {
+    "tools": ["vapi_call"]
+  },
+  "configContracts": {
+    "secretInputPaths": ["apiKey", "webhook.secret"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": { "type": ["string", "object"] },
+      "assistantId": { "type": "string" },
+      "phoneNumberId": { "type": "string" },
+      "agentId": { "type": "string" },
+      "webhook": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "port": { "type": "number" },
+          "path": { "type": "string" },
+          "secret": { "type": ["string", "object"] }
+        }
+      }
+    },
+    "required": ["apiKey"]
+  }
+}
